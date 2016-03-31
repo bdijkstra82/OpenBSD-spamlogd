@@ -35,8 +35,10 @@ And:
 
 ###Example results
 After some time, the TRAPPED portion of your spamdb might look like this:
-![Alt text](/img/example-result.png.png)
-Except for the fancy styling of course.
+
+![showing entries that have dozens of tarpitted attempts over several days](/img/example-result.png)
+
+(Except for the fancy styling.)
 
 ###NOTES of importance casually placed at the very bottom of this document
 * Before upgrading to a new version of OpenBSD, make sure to temporarily disable logging on the spamd port, or temporarily disable spamlogd itself to prevent unwanted interference from the stock spamlogd.
