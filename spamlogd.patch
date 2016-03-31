@@ -1,5 +1,5 @@
 --- libexec/spamlogd/spamlogd.c.orig	Fri Dec 11 18:16:52 2015
-+++ libexec/spamlogd/spamlogd.c	Thu Mar 31 11:23:56 2016
++++ libexec/spamlogd/spamlogd.c	Thu Mar 31 16:34:34 2016
 @@ -21,7 +21,7 @@
   * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
   */
@@ -9,23 +9,7 @@
  
  #include <sys/types.h>
  #include <sys/socket.h>
-@@ -32,6 +32,7 @@
- 
- #include <netinet/in.h>
- #include <netinet/ip.h>
-+#include <netinet/tcp.h>
- #include <arpa/inet.h>
- 
- #include <net/pfvar.h>
-@@ -64,6 +65,7 @@
- int greylist = 1;
- FILE *grey = NULL;
- 
-+u_short spamd_port;
- u_short sync_port;
- int syncsend;
- u_int8_t		 flag_debug = 0;
-@@ -74,13 +76,14 @@
+@@ -74,13 +74,14 @@
  pcap_t			*hpcap = NULL;
  struct syslog_data	 sdata	= SYSLOG_DATA_INIT;
  time_t			 whiteexp = WHITEEXP;
@@ -41,44 +25,7 @@
  void	usage(void);
  
  void
-@@ -110,9 +113,11 @@
- init_pcap(void)
- {
- 	struct bpf_program	bpfp;
--	char	filter[PCAPFSIZ] = "ip and port 25 and action pass "
--		    "and tcp[13]&0x12=0x2";
-+	char	filter[PCAPFSIZ]; 
- 
-+	snprintf(filter, PCAPFSIZ, "ip and (port 25 or %d) and action pass "
-+		    "and tcp[13]&0x12=0x2", spamd_port);
-+
- 	if ((hpcap = pcap_open_live(pflogif, PCAPSNAP, 1, PCAPTIMO,
- 	    errbuf)) == NULL) {
- 		logmsg(LOG_ERR, "Failed to initialize: %s", errbuf);
-@@ -157,6 +162,11 @@
- 	const struct ip		*ip = NULL;
- 	const struct pfloghdr	*hdr;
- 	char			 ipstraddr[40] = { '\0' };
-+	int			 white = 1;
-+	unsigned int		 off;
-+	const struct tcphdr	*tcp;
-+	unsigned int		 iplen;
-+	unsigned int		 port;
- 
- 	hdr = (const struct pfloghdr *)sp;
- 	if (hdr->length < MIN_PFLOG_HDRLEN) {
-@@ -185,26 +195,34 @@
- 		else if (hdr->dir == PF_OUT && !flag_inbound)
- 			inet_ntop(af, &ip->ip_dst, ipstraddr,
- 			    sizeof(ipstraddr));
-+		off = ntohs(ip->ip_off);
-+		if ((off & 0x1fff) == 0) {
-+			iplen = ip->ip_hl * 4;
-+			tcp = (const struct tcphdr *)(sp + hdrlen + iplen);
-+			port = ntohs(tcp->th_dport);
-+			if (port == spamd_port)
-+				white = 0;
-+		}
+@@ -188,16 +189,15 @@
  	}
  
  	if (ipstraddr[0] != '\0') {
@@ -87,29 +34,28 @@
 -		else 
 -			logmsg(LOG_DEBUG,"outbound %s", ipstraddr);
 -		dbupdate(PATH_SPAMD_DB, ipstraddr);
-+		logmsg(LOG_DEBUG, "%s %s %s", 
++		logmsg(LOG_DEBUG, "%s %s", 
 +		    hdr->dir == PF_IN ? "inbound" : "outbound",
-+		    white ? "white" : "spamd",
 +		    ipstraddr);
-+		dbupdate(PATH_SPAMD_DB, ipstraddr, white);
++		dbupdate(PATH_SPAMD_DB, ipstraddr, hdr->dir);
  	}
  }
  
  int
 -dbupdate(char *dbname, char *ip)
-+dbupdate(char *dbname, char *ip, int white)
++dbupdate(char *dbname, char *ip, int dir)
  {
  	HASHINFO	hashinfo;
  	DBT		dbk, dbd;
- 	DB		*db;
- 	struct gdata	gd;
+@@ -206,6 +206,7 @@
  	time_t		now;
--	int		r;
-+	int		r, mod;
+ 	int		r;
  	struct in_addr	ia;
++	int 		action = 0;	/* 0=NOP, 1=white, 2=trap */
  
  	now = time(NULL);
-@@ -224,7 +242,7 @@
+ 	memset(&hashinfo, 0, sizeof(hashinfo));
+@@ -224,7 +225,7 @@
  	dbk.data = ip;
  	memset(&dbd, 0, sizeof(dbd));
  
@@ -118,10 +64,14 @@
  	r = db->get(db, &dbk, &dbd, 0);
  	if (r == -1) {
  		logmsg(LOG_NOTICE, "db->get failed (%m)");
-@@ -237,18 +255,11 @@
- 		gd.first = now;
- 		gd.bcount = 1;
- 		gd.pass = now;
+@@ -233,21 +234,13 @@
+ 
+ 	if (r) {
+ 		/* new entry */
+-		memset(&gd, 0, sizeof(gd));
+-		gd.first = now;
+-		gd.bcount = 1;
+-		gd.pass = now;
 -		gd.expire = now + whiteexp;
 -		memset(&dbk, 0, sizeof(dbk));
 -		dbk.size = strlen(ip);
@@ -133,54 +83,52 @@
 -		if (r) {
 -			logmsg(LOG_NOTICE, "db->put failed (%m)");
 -			goto bad;
--		}
-+		if (white) {
++		if (dir == PF_OUT)  {
++			memset(&gd, 0, sizeof(gd));
++			gd.first = now;
++			gd.pass = now;
 +			gd.expire = now + whiteexp;
-+			mod = 1;
-+		} else	/* don't interfere with greylisting */
-+			mod = 0;
++			gd.bcount = 1;
++			action = 1;
+ 		}
  	} else {
  		/* XXX - backwards compat */
- 		if (gdcopyin(&dbd, &gd) == -1) {
-@@ -256,8 +267,20 @@
+@@ -256,8 +249,17 @@
  			db->del(db, &dbk, 0);
  			goto bad;
  		}
 -		gd.pcount++;
 -		gd.expire = now + whiteexp;
-+		/* fresh WHITE entries may still connect to the spamd port */
-+		if (!white && gd.pcount >= 0)
-+			white = 1;
-+		if (white) {
++		if (dir == PF_OUT || gd.pcount >= 0) {
 +			gd.expire = now + whiteexp;
 +			gd.pcount++;
++			action = 1;
 +		} else {
 +			gd.expire = now + trapexp;
 +			gd.bcount++;
-+			gd.pcount = -1;
++			action = 2;
 +		}
-+		mod = 1;
 +	}
-+	if (mod) {
++	if (action != 0) {
  		memset(&dbk, 0, sizeof(dbk));
  		dbk.size = strlen(ip);
  		dbk.data = ip;
-@@ -272,8 +295,12 @@
+@@ -272,8 +274,12 @@
  	}
  	db->close(db);
  	db = NULL;
 -	if (syncsend)
 -		sync_white(now, now + whiteexp, ip);
-+	if (mod && syncsend) {
-+		if (white)
-+			sync_white(now, now + trapexp, ip);
-+		else
-+			sync_trapped(now, now + trapexp, ip);
++	if (syncsend) {
++		if (action == 1)
++			sync_white(now, gd.expire, ip);
++		else if (action == 2)
++			sync_trapped(now, gd.expire, ip);
 +	}
  	return (0);
   bad:
  	db->close(db);
-@@ -286,7 +313,7 @@
+@@ -286,7 +292,7 @@
  {
  	fprintf(stderr,
  	    "usage: %s [-DI] [-i interface] [-l pflog_interface] "
@@ -189,14 +137,7 @@
  	    __progname);
  	exit(1);
  }
-@@ -303,11 +330,14 @@
- 	char *sync_baddr = NULL;
- 	const char *errstr;
- 
-+	if ((ent = getservbyname("spamd", "tcp")) == NULL)
-+		errx(1, "Can't find service \"spamd\" in /etc/services");
-+	spamd_port = ntohs(ent->s_port);
- 	if ((ent = getservbyname("spamd-sync", "udp")) == NULL)
+@@ -307,7 +313,7 @@
  		errx(1, "Can't find service \"spamd-sync\" in /etc/services");
  	sync_port = ntohs(ent->s_port);
  
@@ -205,7 +146,7 @@
  		switch (ch) {
  		case 'D':
  			flag_debug = 1;
-@@ -320,6 +350,14 @@
+@@ -320,6 +326,14 @@
  			break;
  		case 'l':
  			pflogif = optarg;
@@ -221,7 +162,7 @@
  		case 'W':
  			/* limit whiteexp to 2160 hours (90 days) */
 --- libexec/spamlogd/spamlogd.8.orig	Sun Sep 15 22:02:34 2013
-+++ libexec/spamlogd/spamlogd.8	Thu Mar 31 11:23:56 2016
++++ libexec/spamlogd/spamlogd.8	Thu Mar 31 15:54:14 2016
 @@ -19,12 +19,13 @@
  .Os
  .Sh NAME
