@@ -30,6 +30,7 @@ In pf.conf(4) this means:
 	+	divert-to 127.0.0.1 port spamd
 
 And:
+
 	pfctl -f /etc/pf.conf
 
 ###NOTES of importance casually placed at the very bottom of this document
