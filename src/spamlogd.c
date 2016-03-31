@@ -32,7 +32,6 @@
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <netinet/tcp.h>
 #include <arpa/inet.h>
 
 #include <net/pfvar.h>
@@ -65,7 +64,6 @@ int debug = 1;
 int greylist = 1;
 FILE *grey = NULL;
 
-u_short spamd_port;
 u_short sync_port;
 int syncsend;
 u_int8_t		 flag_debug = 0;
@@ -113,10 +111,8 @@ int
 init_pcap(void)
 {
 	struct bpf_program	bpfp;
-	char	filter[PCAPFSIZ]; 
-
-	snprintf(filter, PCAPFSIZ, "ip and (port 25 or %d) and action pass "
-		    "and tcp[13]&0x12=0x2", spamd_port);
+	char	filter[PCAPFSIZ] = "ip and port 25 and action pass "
+		    "and tcp[13]&0x12=0x2";
 
 	if ((hpcap = pcap_open_live(pflogif, PCAPSNAP, 1, PCAPTIMO,
 	    errbuf)) == NULL) {
@@ -162,11 +158,6 @@ logpkt_handler(u_char *user, const struct pcap_pkthdr *h, const u_char *sp)
 	const struct ip		*ip = NULL;
 	const struct pfloghdr	*hdr;
 	char			 ipstraddr[40] = { '\0' };
-	int			 white = 1;
-	unsigned int		 off;
-	const struct tcphdr	*tcp;
-	unsigned int		 iplen;
-	unsigned int		 port;
 
 	hdr = (const struct pfloghdr *)sp;
 	if (hdr->length < MIN_PFLOG_HDRLEN) {
@@ -195,35 +186,27 @@ logpkt_handler(u_char *user, const struct pcap_pkthdr *h, const u_char *sp)
 		else if (hdr->dir == PF_OUT && !flag_inbound)
 			inet_ntop(af, &ip->ip_dst, ipstraddr,
 			    sizeof(ipstraddr));
-		off = ntohs(ip->ip_off);
-		if ((off & 0x1fff) == 0) {
-			iplen = ip->ip_hl * 4;
-			tcp = (const struct tcphdr *)(sp + hdrlen + iplen);
-			port = ntohs(tcp->th_dport);
-			if (port == spamd_port)
-				white = 0;
-		}
 	}
 
 	if (ipstraddr[0] != '\0') {
-		logmsg(LOG_DEBUG, "%s %s %s", 
+		logmsg(LOG_DEBUG, "%s %s", 
 		    hdr->dir == PF_IN ? "inbound" : "outbound",
-		    white ? "white" : "spamd",
 		    ipstraddr);
-		dbupdate(PATH_SPAMD_DB, ipstraddr, white);
+		dbupdate(PATH_SPAMD_DB, ipstraddr, hdr->dir);
 	}
 }
 
 int
-dbupdate(char *dbname, char *ip, int white)
+dbupdate(char *dbname, char *ip, int dir)
 {
 	HASHINFO	hashinfo;
 	DBT		dbk, dbd;
 	DB		*db;
 	struct gdata	gd;
 	time_t		now;
-	int		r, mod;
+	int		r;
 	struct in_addr	ia;
+	int 		action = 0;	/* 0=NOP, 1=white, 2=trap */
 
 	now = time(NULL);
 	memset(&hashinfo, 0, sizeof(hashinfo));
@@ -251,15 +234,14 @@ dbupdate(char *dbname, char *ip, int white)
 
 	if (r) {
 		/* new entry */
-		memset(&gd, 0, sizeof(gd));
-		gd.first = now;
-		gd.bcount = 1;
-		gd.pass = now;
-		if (white) {
+		if (dir == PF_OUT)  {
+			memset(&gd, 0, sizeof(gd));
+			gd.first = now;
+			gd.pass = now;
 			gd.expire = now + whiteexp;
-			mod = 1;
-		} else	/* don't interfere with greylisting */
-			mod = 0;
+			gd.bcount = 1;
+			action = 1;
+		}
 	} else {
 		/* XXX - backwards compat */
 		if (gdcopyin(&dbd, &gd) == -1) {
@@ -267,20 +249,17 @@ dbupdate(char *dbname, char *ip, int white)
 			db->del(db, &dbk, 0);
 			goto bad;
 		}
-		/* fresh WHITE entries may still connect to the spamd port */
-		if (!white && gd.pcount >= 0)
-			white = 1;
-		if (white) {
+		if (dir == PF_OUT || gd.pcount >= 0) {
 			gd.expire = now + whiteexp;
 			gd.pcount++;
+			action = 1;
 		} else {
 			gd.expire = now + trapexp;
 			gd.bcount++;
-			gd.pcount = -1;
+			action = 2;
 		}
-		mod = 1;
 	}
-	if (mod) {
+	if (action != 0) {
 		memset(&dbk, 0, sizeof(dbk));
 		dbk.size = strlen(ip);
 		dbk.data = ip;
@@ -295,11 +274,11 @@ dbupdate(char *dbname, char *ip, int white)
 	}
 	db->close(db);
 	db = NULL;
-	if (mod && syncsend) {
-		if (white)
-			sync_white(now, now + trapexp, ip);
-		else
-			sync_trapped(now, now + trapexp, ip);
+	if (syncsend) {
+		if (action == 1)
+			sync_white(now, gd.expire, ip);
+		else if (action == 2)
+			sync_trapped(now, gd.expire, ip);
 	}
 	return (0);
  bad:
@@ -330,9 +309,6 @@ main(int argc, char **argv)
 	char *sync_baddr = NULL;
 	const char *errstr;
 
-	if ((ent = getservbyname("spamd", "tcp")) == NULL)
-		errx(1, "Can't find service \"spamd\" in /etc/services");
-	spamd_port = ntohs(ent->s_port);
 	if ((ent = getservbyname("spamd-sync", "udp")) == NULL)
 		errx(1, "Can't find service \"spamd-sync\" in /etc/services");
 	sync_port = ntohs(ent->s_port);
