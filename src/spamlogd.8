@@ -38,11 +38,12 @@ used for greylisting.
 .Nm
 updates the
 .Pa /var/db/spamd
-whitelist and blacklist entries whenever a connection
+whitelist entries whenever a connection
 to port 25 is logged to the
 .Xr pflog 4
-interface.
-The source addresses of inbound connections are updated
+interface, and existing trapped entries whenever a connection
+to port 8025 is logged.
+The source addresses of inbound connections are added or updated
 when seen by
 .Nm
 to ensure that their entries in
@@ -65,10 +66,10 @@ does not disassociate from the controlling terminal.
 .It Fl I
 Specify that
 .Nm
-is only to update inbound SMTP connections.
+is only to add or update inbound connections.
 By default
 .Nm
-will update the source of inbound connections, and add or update the
+will add or update the source of inbound connections, and the
 target of outbound SMTP connections.
 .It Fl i Ar interface
 Specify a network interface on which packets must arrive.
@@ -102,7 +103,7 @@ It is important to log any connections to and from the real
 MTA in order for
 .Nm
 to update the whitelist entries.
-In order to update the blacklist entries, log incoming connections to the
+In order to update the trapped entries, log incoming connections to the
 .Xr spamd 8
 daemon.
 See
@@ -119,7 +120,7 @@ will log each connection it sees at level
 .Dv LOG_DEBUG .
 .Sh SYNCHRONISATION
 .Nm
-supports realtime synchronisation of whitelist and blacklist states by sending
+supports realtime synchronisation of whitelist states by sending
 the information it updates to
 a number of
 .Xr spamd 8
