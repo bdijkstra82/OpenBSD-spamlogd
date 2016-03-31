@@ -1,0 +1,293 @@
+--- libexec/spamlogd/spamlogd.c.orig	Wed Jan 21 22:50:33 2015
++++ libexec/spamlogd/spamlogd.c	Mon Jul 20 12:32:01 2015
+@@ -21,7 +21,7 @@
+  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  */
+ 
+-/* watch pf log for mail connections, update whitelist entries. */
++/* watch pf log for mail connections, update spamdb entries. */
+ 
+ #include <sys/types.h>
+ #include <sys/socket.h>
+@@ -32,6 +32,7 @@
+ 
+ #include <netinet/in.h>
+ #include <netinet/ip.h>
++#include <netinet/tcp.h>
+ #include <arpa/inet.h>
+ 
+ #include <net/pfvar.h>
+@@ -64,6 +65,7 @@
+ int greylist = 1;
+ FILE *grey = NULL;
+ 
++u_short spamd_port;
+ u_short sync_port;
+ int syncsend;
+ u_int8_t		 flag_debug = 0;
+@@ -74,13 +76,14 @@
+ pcap_t			*hpcap = NULL;
+ struct syslog_data	 sdata	= SYSLOG_DATA_INIT;
+ time_t			 whiteexp = WHITEEXP;
++time_t			 trapexp = TRAPEXP;
+ extern char		*__progname;
+ 
+ void	logmsg(int , const char *, ...);
+ void	sighandler_close(int);
+ int	init_pcap(void);
+ void	logpkt_handler(u_char *, const struct pcap_pkthdr *, const u_char *);
+-int	dbupdate(char *, char *);
++int	dbupdate(char *, char *, int);
+ void	usage(void);
+ 
+ void
+@@ -110,9 +113,11 @@
+ init_pcap(void)
+ {
+ 	struct bpf_program	bpfp;
+-	char	filter[PCAPFSIZ] = "ip and port 25 and action pass "
+-		    "and tcp[13]&0x12=0x2";
++	char	filter[PCAPFSIZ]; 
+ 
++	snprintf(filter, PCAPFSIZ, "ip and (port 25 or %d) and action pass "
++		    "and tcp[13]&0x12=0x2", spamd_port);
++
+ 	if ((hpcap = pcap_open_live(pflogif, PCAPSNAP, 1, PCAPTIMO,
+ 	    errbuf)) == NULL) {
+ 		logmsg(LOG_ERR, "Failed to initialize: %s", errbuf);
+@@ -157,6 +162,11 @@
+ 	const struct ip		*ip = NULL;
+ 	const struct pfloghdr	*hdr;
+ 	char			 ipstraddr[40] = { '\0' };
++	int			 white = 1;
++	unsigned int		 off;
++	const struct tcphdr	*tcp;
++	unsigned int		 iplen;
++	unsigned int		 port;
+ 
+ 	hdr = (const struct pfloghdr *)sp;
+ 	if (hdr->length < MIN_PFLOG_HDRLEN) {
+@@ -185,26 +195,34 @@
+ 		else if (hdr->dir == PF_OUT && !flag_inbound)
+ 			inet_ntop(af, &ip->ip_dst, ipstraddr,
+ 			    sizeof(ipstraddr));
++		off = ntohs(ip->ip_off);
++		if ((off & 0x1fff) == 0) {
++			iplen = ip->ip_hl * 4;
++			tcp = (const struct tcphdr *)(sp + hdrlen + iplen);
++			port = ntohs(tcp->th_dport);
++			if (port == spamd_port)
++				white = 0;
++		}
+ 	}
+ 
+ 	if (ipstraddr[0] != '\0') {
+-		if (hdr->dir == PF_IN)
+-			logmsg(LOG_DEBUG,"inbound %s", ipstraddr);
+-		else 
+-			logmsg(LOG_DEBUG,"outbound %s", ipstraddr);
+-		dbupdate(PATH_SPAMD_DB, ipstraddr);
++		logmsg(LOG_DEBUG, "%s %s %s", 
++		    hdr->dir == PF_IN ? "inbound" : "outbound",
++		    white ? "white" : "spamd",
++		    ipstraddr);
++		dbupdate(PATH_SPAMD_DB, ipstraddr, white);
+ 	}
+ }
+ 
+ int
+-dbupdate(char *dbname, char *ip)
++dbupdate(char *dbname, char *ip, int white)
+ {
+ 	HASHINFO	hashinfo;
+ 	DBT		dbk, dbd;
+ 	DB		*db;
+ 	struct gdata	gd;
+ 	time_t		now;
+-	int		r;
++	int		r, mod;
+ 	struct in_addr	ia;
+ 
+ 	now = time(NULL);
+@@ -224,7 +242,7 @@
+ 	dbk.data = ip;
+ 	memset(&dbd, 0, sizeof(dbd));
+ 
+-	/* add or update whitelist entry */
++	/* add or update entry */
+ 	r = db->get(db, &dbk, &dbd, 0);
+ 	if (r == -1) {
+ 		logmsg(LOG_NOTICE, "db->get failed (%m)");
+@@ -237,18 +255,11 @@
+ 		gd.first = now;
+ 		gd.bcount = 1;
+ 		gd.pass = now;
+-		gd.expire = now + whiteexp;
+-		memset(&dbk, 0, sizeof(dbk));
+-		dbk.size = strlen(ip);
+-		dbk.data = ip;
+-		memset(&dbd, 0, sizeof(dbd));
+-		dbd.size = sizeof(gd);
+-		dbd.data = &gd;
+-		r = db->put(db, &dbk, &dbd, 0);
+-		if (r) {
+-			logmsg(LOG_NOTICE, "db->put failed (%m)");
+-			goto bad;
+-		}
++		if (white) {
++			gd.expire = now + whiteexp;
++			mod = 1;
++		} else	/* don't interfere with greylisting */
++			mod = 0;
+ 	} else {
+ 		/* XXX - backwards compat */
+ 		if (gdcopyin(&dbd, &gd) == -1) {
+@@ -256,8 +267,20 @@
+ 			db->del(db, &dbk, 0);
+ 			goto bad;
+ 		}
+-		gd.pcount++;
+-		gd.expire = now + whiteexp;
++		/* fresh WHITE entries may still connect to the spamd port */
++		if (!white && gd.pcount >= 0)
++			white = 1;
++		if (white) {
++			gd.expire = now + whiteexp;
++			gd.pcount++;
++		} else {
++			gd.expire = now + trapexp;
++			gd.bcount++;
++			gd.pcount = -1;
++		}
++		mod = 1;
++	}
++	if (mod) {
+ 		memset(&dbk, 0, sizeof(dbk));
+ 		dbk.size = strlen(ip);
+ 		dbk.data = ip;
+@@ -272,8 +295,12 @@
+ 	}
+ 	db->close(db);
+ 	db = NULL;
+-	if (syncsend)
+-		sync_white(now, now + whiteexp, ip);
++	if (mod && syncsend) {
++		if (white)
++			sync_white(now, now + trapexp, ip);
++		else
++			sync_trapped(now, now + trapexp, ip);
++	}
+ 	return (0);
+  bad:
+ 	db->close(db);
+@@ -286,7 +313,7 @@
+ {
+ 	fprintf(stderr,
+ 	    "usage: %s [-DI] [-i interface] [-l pflog_interface] "
+-	    "[-W whiteexp] [-Y synctarget]\n",
++	    "[-W whiteexp] [-T trapexp] [-Y synctarget]\n",
+ 	    __progname);
+ 	exit(1);
+ }
+@@ -303,11 +330,14 @@
+ 	char *sync_baddr = NULL;
+ 	const char *errstr;
+ 
++	if ((ent = getservbyname("spamd", "tcp")) == NULL)
++		errx(1, "Can't find service \"spamd\" in /etc/services");
++	spamd_port = ntohs(ent->s_port);
+ 	if ((ent = getservbyname("spamd-sync", "udp")) == NULL)
+ 		errx(1, "Can't find service \"spamd-sync\" in /etc/services");
+ 	sync_port = ntohs(ent->s_port);
+ 
+-	while ((ch = getopt(argc, argv, "DIi:l:W:Y:")) != -1) {
++	while ((ch = getopt(argc, argv, "DIi:l:T:W:Y:")) != -1) {
+ 		switch (ch) {
+ 		case 'D':
+ 			flag_debug = 1;
+@@ -320,6 +350,14 @@
+ 			break;
+ 		case 'l':
+ 			pflogif = optarg;
++			break;
++		case 'T':
++			/* limit trapexp to 2160 hours (90 days) */
++			trapexp = strtonum(optarg, 1, (24 * 90), &errstr);
++			if (errstr)
++				usage();
++			/* convert to seconds from hours */
++			trapexp *= (60 * 60);
+ 			break;
+ 		case 'W':
+ 			/* limit whiteexp to 2160 hours (90 days) */
+--- libexec/spamlogd/spamlogd.8.orig	Sun Sep 15 22:02:34 2013
++++ libexec/spamlogd/spamlogd.8	Mon Jul 20 12:32:01 2015
+@@ -19,12 +19,13 @@
+ .Os
+ .Sh NAME
+ .Nm spamlogd
+-.Nd spamd whitelist updating daemon
++.Nd spamd database updating daemon
+ .Sh SYNOPSIS
+ .Nm spamlogd
+ .Op Fl DI
+ .Op Fl i Ar interface
+ .Op Fl l Ar pflog_interface
++.Op Fl T Ar trapexp
+ .Op Fl W Ar whiteexp
+ .Op Fl Y Ar synctarget
+ .Sh DESCRIPTION
+@@ -40,13 +41,14 @@
+ whitelist entries whenever a connection
+ to port 25 is logged to the
+ .Xr pflog 4
+-interface.
+-The source addresses of inbound connections are whitelisted
++interface, and existing trapped entries whenever a connection
++to port 8025 is logged.
++The source addresses of inbound connections are added or updated
+ when seen by
+ .Nm
+ to ensure that their entries in
+ .Pa /var/db/spamd
+-do not expire if the connecting host continues to send legitimate mail.
++do not expire if the connecting host continues to connect.
+ The destination addresses of outbound connections are whitelisted
+ when seen by
+ .Nm
+@@ -64,10 +66,10 @@
+ .It Fl I
+ Specify that
+ .Nm
+-is only to whitelist inbound SMTP connections.
++is only to add or update inbound connections.
+ By default
+ .Nm
+-will whitelist the source of inbound SMTP connections, and the
++will add or update the source of inbound connections, and the
+ target of outbound SMTP connections.
+ .It Fl i Ar interface
+ Specify a network interface on which packets must arrive.
+@@ -78,6 +80,12 @@
+ interface to listen for connection notifications.
+ The default is to watch for connections logged on
+ .Dq pflog0 .
++.It Fl T Ar trapexp
++Adjust the time for
++.Ar trapexp
++in hours.
++The default is 24 hours (one day); maximum is 2160 hours
++(approximately 90 days).
+ .It Fl W Ar whiteexp
+ Adjust the time for
+ .Ar whiteexp
+@@ -95,6 +103,9 @@
+ MTA in order for
+ .Nm
+ to update the whitelist entries.
++In order to update the trapped entries, log incoming connections to the
++.Xr spamd 8
++daemon.
+ See
+ .Xr spamd 8
+ for an example ruleset for logging such connections.
