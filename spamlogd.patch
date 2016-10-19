@@ -1,5 +1,5 @@
---- libexec/spamlogd/spamlogd.c.orig	Fri Dec 11 18:16:52 2015
-+++ libexec/spamlogd/spamlogd.c	Thu Mar 31 16:34:34 2016
+--- libexec/spamlogd/spamlogd.c.orig	Wed Mar 16 15:47:04 2016
++++ libexec/spamlogd/spamlogd.c	Wed Oct 19 10:28:33 2016
 @@ -21,7 +21,7 @@
   * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
   */
@@ -9,7 +9,7 @@
  
  #include <sys/types.h>
  #include <sys/socket.h>
-@@ -74,13 +74,14 @@
+@@ -76,13 +76,14 @@
  pcap_t			*hpcap = NULL;
  struct syslog_data	 sdata	= SYSLOG_DATA_INIT;
  time_t			 whiteexp = WHITEEXP;
@@ -22,7 +22,7 @@
  void	logpkt_handler(u_char *, const struct pcap_pkthdr *, const u_char *);
 -int	dbupdate(char *, char *);
 +int	dbupdate(char *, char *, int);
- void	usage(void);
+ __dead void	usage(void);
  
  void
 @@ -188,16 +189,15 @@
@@ -137,7 +137,7 @@
  	    __progname);
  	exit(1);
  }
-@@ -307,7 +313,7 @@
+@@ -310,7 +316,7 @@
  		errx(1, "Can't find service \"spamd-sync\" in /etc/services");
  	sync_port = ntohs(ent->s_port);
  
@@ -146,7 +146,7 @@
  		switch (ch) {
  		case 'D':
  			flag_debug = 1;
-@@ -320,6 +326,14 @@
+@@ -323,6 +329,14 @@
  			break;
  		case 'l':
  			pflogif = optarg;
@@ -162,7 +162,7 @@
  		case 'W':
  			/* limit whiteexp to 2160 hours (90 days) */
 --- libexec/spamlogd/spamlogd.8.orig	Sun Sep 15 22:02:34 2013
-+++ libexec/spamlogd/spamlogd.8	Thu Mar 31 15:54:14 2016
++++ libexec/spamlogd/spamlogd.8	Wed Oct 19 10:26:30 2016
 @@ -19,12 +19,13 @@
  .Os
  .Sh NAME
