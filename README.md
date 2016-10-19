@@ -1,5 +1,5 @@
 # OpenBSD-spamlogd
-Modification of OpenBSD's spamlogd(8) that also updates TRAPPED entries in /var/db/spamd. Requires OpenBSD 5.8 or higher with source tree. Tested on OpenBSD 5.9.
+Modification of OpenBSD's spamlogd(8) that also updates TRAPPED entries in /var/db/spamd. Requires OpenBSD 5.8 or higher with source tree. Tested on OpenBSD 6.0.
 
 To download and apply the patch:
 
@@ -8,7 +8,7 @@ To download and apply the patch:
 	cd /usr/src
 	patch -p0 < /tmp/spamlogd.patch
 
-Now you can read the manpage:
+Now you can read the modified manpage:
 
 	mandoc libexec/spamlogd/spamlogd.8 | less
 
@@ -16,6 +16,7 @@ To build, install and run:
 
 	cd /usr/src/libexec/spamlogd
 	make obj
+	make depend
 	make
 	make install
 	/etc/rc.d/spamlogd restart
