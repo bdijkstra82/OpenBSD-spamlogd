@@ -1,5 +1,5 @@
 # OpenBSD-spamlogd
-Modification of OpenBSD's spamlogd(8) that also updates TRAPPED entries in /var/db/spamd. Requires OpenBSD 5.8 or higher with source tree. Tested on OpenBSD 6.0.
+Modification of OpenBSD's [spamlogd](http://man.openbsd.org/spamlogd.8) that also updates TRAPPED entries in /var/db/spamd. Requires OpenBSD 5.8 or higher with source tree. Tested on OpenBSD 6.1.
 
 To download and apply the patch:
 
@@ -22,13 +22,12 @@ To build, install and run:
 	/etc/rc.d/spamlogd restart
 
 At this point, spamlogd should behave as before.
-To activate the new feature, packets to spamd(8) must also be logged (and on the same pflog(4) interface).
-In pf.conf(4) this means:
+To activate the new feature, packets to [spamd](http://man.openbsd.org/spamd.8) must also be logged (and on the same [pflog](http://man.openbsd.org/pflog.4) interface).
+In [pf.conf](http://man.openbsd.org/pf.conf.5) this normally means:
 
-	-pass in     on egress proto tcp from any to any port smtp \
-	-	divert-to 127.0.0.1 port spamd
+	-pass in on egress proto tcp from any to any port smtp \
 	+pass in log on egress proto tcp from any to any port smtp \
-	+	divert-to 127.0.0.1 port spamd
+	 	divert-to 127.0.0.1 port spamd
 
 And:
 
